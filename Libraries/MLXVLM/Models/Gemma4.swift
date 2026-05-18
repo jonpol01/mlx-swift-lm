@@ -1665,16 +1665,25 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
     /// LoRA-targetable layers across both towers.
     ///
     /// Upstream returned only `languageModel.model.layers`, which meant adapters
-    /// trained with `mlx_vlm.lora --train-vision` (Python) could never be loaded
+    /// trained with `mlx_vlm.lora --train-vision` (Python) couldn't be loaded
     /// here — vision_tower keys would fail the `verify: .noUnusedKeys` check in
     /// `LoRAContainer.load`. Visionkit's use case (reading engraved characters)
     /// needs vision_tower adaptation, so we include both towers.
+    ///
+    /// **Ordering matters.** `LoRAContainer.load` calls
+    /// `lora.loraLayers.suffix(configuration.numLayers)`. Putting language layers
+    /// LAST means:
+    ///   - `num_layers = 42` (language-only adapter) → suffix picks all 42 lang
+    ///     decoders, vision_tower untouched. Backward compatible.
+    ///   - `num_layers = lang + vision` → suffix picks everything.
+    /// The first version of this patch had language first, which made suffix(42)
+    /// skip the first 27 language layers and over-replace vision layers.
     ///
     /// `loraDefaultKeys` auto-derives target sub-module names from these layers,
     /// so attention/MLP linears in the vision transformer blocks are picked up
     /// automatically. Adapter configs may still override with explicit `keys`.
     public var loraLayers: [Module] {
-        languageModel.model.layers + visionTower.encoder.layers
+        visionTower.encoder.layers + languageModel.model.layers
     }
 
     public init(_ config: Gemma4Configuration) {
