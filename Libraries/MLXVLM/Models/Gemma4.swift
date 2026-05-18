@@ -1958,7 +1958,21 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
 
     public var vocabularySize: Int { config.vocabularySize }
     public var kvHeads: [Int] { languageModel.kvHeads }
-    public var loraLayers: [Module] { languageModel.model.layers }
+
+    /// LoRA-targetable layers across both towers.
+    ///
+    /// Upstream returned only `languageModel.model.layers`, which meant adapters
+    /// trained with `mlx_vlm.lora --train-vision` (Python) could never be loaded
+    /// here — vision_tower keys would fail the `verify: .noUnusedKeys` check in
+    /// `LoRAContainer.load`. Visionkit's use case (reading engraved characters)
+    /// needs vision_tower adaptation, so we include both towers.
+    ///
+    /// `loraDefaultKeys` auto-derives target sub-module names from these layers,
+    /// so attention/MLP linears in the vision transformer blocks are picked up
+    /// automatically. Adapter configs may still override with explicit `keys`.
+    public var loraLayers: [Module] {
+        languageModel.model.layers + visionTower.encoder.layers
+    }
 
     public init(_ config: Gemma4Configuration) {
         self.config = config
