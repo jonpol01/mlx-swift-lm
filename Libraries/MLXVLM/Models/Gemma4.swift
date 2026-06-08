@@ -1133,6 +1133,21 @@ private final class Gemma4TextLanguageModel: Module, KVCacheDimensionProvider {
             if key.contains("rotary_emb") {
                 continue
             }
+            // KV-shared text-decoder layers (the last numKVSharedLayers) reuse K/V from their
+            // source layer, so the model has no k/v projection/norm modules there. Native
+            // checkpoints omit these weights; some conversions (e.g. the PTQ 4-bit) materialize
+            // them — drop them either way so the weight set matches the model. The forward
+            // already ignores them (sharedKV path), so this changes no output.
+            if config.numKVSharedLayers > 0, key.contains(".self_attn."),
+                key.contains(".k_proj.") || key.contains(".k_norm.")
+                    || key.contains(".v_proj.") || key.contains(".v_norm."),
+                let r = key.range(of: "language_model.model.layers."),
+                let dot = key[r.upperBound...].firstIndex(of: "."),
+                let li = Int(key[r.upperBound..<dot]),
+                li >= config.hiddenLayers - config.numKVSharedLayers
+            {
+                continue
+            }
 
             var newKey = key
             if newKey.hasPrefix("model.") {
