@@ -186,8 +186,23 @@ public struct LoRAContainer: ModelAdapter, @unchecked Sendable {
             createReplacementLayer(target: layer, configuration: configuration)
         }
 
+        // Load only adapter deltas whose target parameter actually exists in the (now-wrapped)
+        // model. Adapters trained on a model that materialized K/V on every layer carry deltas
+        // for the KV-shared layers' k/v projections, which this model (correctly) omits — and
+        // those deltas were always dead (the forward reuses the source layer's K/V), so dropping
+        // them changes no output while stopping `update` from failing on the absent modules.
+        // For models where every target exists this drops nothing, so behaviour is unchanged.
+        let modelParamKeys = Set(model.parameters().flattened().map { $0.0 })
+        let flat = parameters.flattened()
+        let kept = flat.filter { modelParamKeys.contains($0.0) }
+        if kept.count != flat.count {
+            print(
+                "[LoRA] dropped \(flat.count - kept.count)/\(flat.count) adapter deltas with no "
+                    + "matching module (e.g. KV-shared layers' k/v)")
+        }
+
         try model.update(
-            parameters: parameters,
+            parameters: ModuleParameters.unflattened(Dictionary(uniqueKeysWithValues: kept)),
             verify: .noUnusedKeys
         )
     }
