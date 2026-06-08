@@ -585,12 +585,13 @@ private final class Gemma4TextAttention: Module {
     let useKEqV: Bool
 
     @ModuleInfo(key: "q_proj") var qProj: Linear
-    @ModuleInfo(key: "k_proj") var kProj: Linear
+    // Optional: KV-shared layers (last numKVSharedLayers) carry no k/v in the checkpoint.
+    @ModuleInfo(key: "k_proj") var kProj: Linear?
     @ModuleInfo(key: "v_proj") var vProj: Linear?
     @ModuleInfo(key: "o_proj") var oProj: Linear
     @ModuleInfo(key: "q_norm") var qNorm: Gemma4RMSNormZeroShift
-    @ModuleInfo(key: "k_norm") var kNorm: Gemma4RMSNormZeroShift
-    @ModuleInfo(key: "v_norm") var vNorm: Gemma4RMSNormNoScale
+    @ModuleInfo(key: "k_norm") var kNorm: Gemma4RMSNormZeroShift?
+    @ModuleInfo(key: "v_norm") var vNorm: Gemma4RMSNormNoScale?
     @ModuleInfo var rope: OffsetLayer
 
     init(config: Gemma4TextConfiguration, layerIdx: Int) {
@@ -611,17 +612,25 @@ private final class Gemma4TextAttention: Module {
         self.isKVSharedLayer = layerIdx >= firstKVSharedLayer && firstKVSharedLayer > 0
 
         self._qProj.wrappedValue = Linear(config.hiddenSize, numHeads * headDim, bias: false)
-        self._kProj.wrappedValue = Linear(config.hiddenSize, numKVHeads * headDim, bias: false)
-        if !useKEqV {
-            self._vProj.wrappedValue = Linear(
+        // KV-shared layers reuse K/V from their source layer (see backbone `intermediates`),
+        // so they carry NO k/v projections or norms in the checkpoint — only build them on
+        // KV-producing layers, otherwise the weight loader demands keys that don't exist.
+        if !isKVSharedLayer {
+            self._kProj.wrappedValue = Linear(
                 config.hiddenSize, numKVHeads * headDim, bias: false)
+            if !useKEqV {
+                self._vProj.wrappedValue = Linear(
+                    config.hiddenSize, numKVHeads * headDim, bias: false)
+            }
         }
         self._oProj.wrappedValue = Linear(numHeads * headDim, config.hiddenSize, bias: false)
         self._qNorm.wrappedValue = Gemma4RMSNormZeroShift(
             dimensions: headDim, eps: config.rmsNormEps)
-        self._kNorm.wrappedValue = Gemma4RMSNormZeroShift(
-            dimensions: headDim, eps: config.rmsNormEps)
-        self._vNorm.wrappedValue = Gemma4RMSNormNoScale(eps: config.rmsNormEps)
+        if !isKVSharedLayer {
+            self._kNorm.wrappedValue = Gemma4RMSNormZeroShift(
+                dimensions: headDim, eps: config.rmsNormEps)
+            self._vNorm.wrappedValue = Gemma4RMSNormNoScale(eps: config.rmsNormEps)
+        }
 
         let ropeKey = isSliding ? "sliding_attention" : "full_attention"
         let ropeConfig = config.ropeParameters[ropeKey]
@@ -656,15 +665,15 @@ private final class Gemma4TextAttention: Module {
             kvState = sharedKV
         } else {
             currentOffset = cache?.offset ?? 0
-            var keys = kProj(x).reshaped(batch, length, numKVHeads, headDim)
+            var keys = kProj!(x).reshaped(batch, length, numKVHeads, headDim)
             var values =
                 if useKEqV {
                     keys
                 } else {
                     vProj!(x).reshaped(batch, length, numKVHeads, headDim)
                 }
-            keys = kNorm(keys).transposed(0, 2, 1, 3)
-            values = vNorm(values).transposed(0, 2, 1, 3)
+            keys = kNorm!(keys).transposed(0, 2, 1, 3)
+            values = vNorm!(values).transposed(0, 2, 1, 3)
             keys = rope(keys, offset: currentOffset)
             if let quantizedCache = cache as? QuantizedKVCacheProtocol {
                 let (quantizedKeys, quantizedValues) = quantizedCache.updateQuantized(
