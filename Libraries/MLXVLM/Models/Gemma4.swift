@@ -1969,6 +1969,13 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
     public var kvHeads: [Int] { languageModel.kvHeads }
     public var loraLayers: [Module] { languageModel.model.layers }
 
+    /// Final-norm hidden states of the text decoder, `(B, L, hidden)`, without the LM head:
+    /// the encoder-style tap MLXLLM's Gemma 4 exposes at the same SPI, for heads that read
+    /// hidden states (classifiers, pointer heads) on top of the resident VLM.
+    @_spi(GemmaEncoder) public func textHiddenStates(_ inputs: MLXArray) -> MLXArray {
+        languageModel.model(inputs).hidden
+    }
+
     public init(_ config: Gemma4Configuration) {
         self.config = config
         self._visionTower.wrappedValue = Gemma4VisionModel(config: config.visionConfiguration)
