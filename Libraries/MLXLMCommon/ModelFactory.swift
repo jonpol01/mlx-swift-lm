@@ -288,10 +288,11 @@ public func loadModel(
     useLatest: Bool = false,
     progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
 ) async throws -> sending ModelContext {
-    try await load {
-        try await $0.load(
-            from: downloader, using: tokenizerLoader, configuration: configuration,
-            useLatest: useLatest, progressHandler: progressHandler)
+    try await load(
+        from: downloader, configuration: configuration, useLatest: useLatest,
+        progressHandler: progressHandler
+    ) {
+        try await $0._load(configuration: $1, tokenizerLoader: tokenizerLoader)
     }
 }
 
@@ -314,10 +315,11 @@ public func loadModelContainer(
     useLatest: Bool = false,
     progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
 ) async throws -> sending ModelContainer {
-    try await load {
-        try await $0.loadContainer(
-            from: downloader, using: tokenizerLoader, configuration: configuration,
-            useLatest: useLatest, progressHandler: progressHandler)
+    try await load(
+        from: downloader, configuration: configuration, useLatest: useLatest,
+        progressHandler: progressHandler
+    ) {
+        $0._wrap(try await $0._load(configuration: $1, tokenizerLoader: tokenizerLoader))
     }
 }
 
@@ -342,11 +344,11 @@ public func loadModel(
     useLatest: Bool = false,
     progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
 ) async throws -> sending ModelContext {
-    try await load {
-        try await $0.load(
-            from: downloader, using: tokenizerLoader,
-            configuration: .init(id: id, revision: revision),
-            useLatest: useLatest, progressHandler: progressHandler)
+    try await load(
+        from: downloader, configuration: .init(id: id, revision: revision),
+        useLatest: useLatest, progressHandler: progressHandler
+    ) {
+        try await $0._load(configuration: $1, tokenizerLoader: tokenizerLoader)
     }
 }
 
@@ -371,11 +373,11 @@ public func loadModelContainer(
     useLatest: Bool = false,
     progressHandler: @Sendable @escaping (Progress) -> Void = { _ in }
 ) async throws -> sending ModelContainer {
-    try await load {
-        try await $0.loadContainer(
-            from: downloader, using: tokenizerLoader,
-            configuration: .init(id: id, revision: revision),
-            useLatest: useLatest, progressHandler: progressHandler)
+    try await load(
+        from: downloader, configuration: .init(id: id, revision: revision),
+        useLatest: useLatest, progressHandler: progressHandler
+    ) {
+        $0._wrap(try await $0._load(configuration: $1, tokenizerLoader: tokenizerLoader))
     }
 }
 
@@ -392,7 +394,9 @@ public func loadModel(
     from directory: URL,
     using tokenizerLoader: any TokenizerLoader
 ) async throws -> sending ModelContext {
-    try await load {
+    try await load(
+        factories: ModelFactoryRegistry.shared.modelFactories(), modelDirectory: directory
+    ) {
         try await $0.load(from: directory, using: tokenizerLoader)
     }
 }
@@ -410,29 +414,71 @@ public func loadModelContainer(
     from directory: URL,
     using tokenizerLoader: any TokenizerLoader
 ) async throws -> sending ModelContainer {
-    try await load {
+    try await load(
+        factories: ModelFactoryRegistry.shared.modelFactories(), modelDirectory: directory
+    ) {
         try await $0.loadContainer(from: directory, using: tokenizerLoader)
     }
 }
 
-private func load<R>(loader: (any ModelFactory) async throws -> sending R) async throws -> sending R
-{
+/// Resolve the model files once, then try each registered factory on them.
+private func load<R>(
+    from downloader: any Downloader,
+    configuration: ModelConfiguration,
+    useLatest: Bool,
+    progressHandler: @Sendable @escaping (Progress) -> Void,
+    loader: (any ModelFactory, ResolvedModelConfiguration) async throws -> sending R
+) async throws -> sending R {
     let factories = ModelFactoryRegistry.shared.modelFactories()
-    var lastError: Error?
+    guard !factories.isEmpty else {
+        throw ModelFactoryError.noModelFactoryAvailable
+    }
+    let resolved = try await resolve(
+        configuration: configuration, from: downloader,
+        useLatest: useLatest, progressHandler: progressHandler)
+    return try await load(factories: factories, modelDirectory: resolved.modelDirectory) {
+        try await loader($0, resolved)
+    }
+}
+
+/// Try each factory in order and return the first model that loads.
+///
+/// Any error other than ``ModelFactoryError/unsupportedModelType(_:)`` means the factory
+/// handles the model but failed. For a checkpoint with a `vision_config` that error is
+/// thrown, because a later text-only factory would silently drop image input.
+private func load<R>(
+    factories: [any ModelFactory],
+    modelDirectory: URL,
+    loader: (any ModelFactory) async throws -> sending R
+) async throws -> sending R {
+    var loadError: Error?
     for factory in factories {
         do {
-            let model = try await loader(factory)
-            return model
+            return try await loader(factory)
         } catch {
-            lastError = error
+            if case ModelFactoryError.unsupportedModelType = error {
+                loadError = loadError ?? error
+            } else if declaresVisionConfiguration(modelDirectory: modelDirectory) {
+                throw error
+            } else {
+                loadError = error
+            }
         }
     }
 
-    if let lastError {
-        throw lastError
-    } else {
-        throw ModelFactoryError.noModelFactoryAvailable
-    }
+    throw loadError ?? ModelFactoryError.noModelFactoryAvailable
+}
+
+/// True when `config.json` has a non-empty `vision_config`. Text-only exports of multimodal
+/// models (`mlx_lm.convert`) remove it.
+private func declaresVisionConfiguration(modelDirectory: URL) -> Bool {
+    guard
+        let data = try? Data(contentsOf: modelDirectory.appending(component: "config.json")),
+        let root = try? JSONSerialization.jsonObject(with: data, options: .json5Allowed)
+            as? [String: Any],
+        let vision = root["vision_config"] as? [String: Any]
+    else { return false }
+    return !vision.isEmpty
 }
 
 /// Protocol for types that can provide ModelFactory instances.
@@ -474,6 +520,11 @@ public protocol ModelFactoryTrampoline {
 /// ```swift
 /// let model = try await loadModel(from: downloader, using: tokenizerLoader, id: "mlx-community/Qwen3-4B-4bit")
 /// ```
+///
+/// Factories are tried in order (VLM, then LLM, then added trampolines). If a factory supports
+/// the model type but fails to load a checkpoint whose `config.json` has a `vision_config`,
+/// that error is thrown instead of loading the checkpoint as text-only with a later factory.
+/// To load such a checkpoint as text-only, call `LLMModelFactory.shared` directly.
 ///
 /// ## See Also
 /// - ``loadModel(from:using:id:revision:useLatest:progressHandler:)``
