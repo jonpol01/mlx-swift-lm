@@ -1969,6 +1969,12 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider, Suppresse
     public var kvHeads: [Int] { languageModel.kvHeads }
     public var loraLayers: [Module] { languageModel.model.layers }
 
+    /// Final-norm hidden states of the text decoder, `(B, L, hiddenSize)`: the LM head's input.
+    /// For heads that read hidden states (classifiers, pointer heads) on the loaded VLM.
+    @_spi(GemmaEncoder) public func textHiddenStates(_ inputs: MLXArray) -> MLXArray {
+        languageModel.model(inputs).hidden
+    }
+
     /// Multimodal placeholder token IDs that must never be sampled as text.
     /// Seeded from the model configuration; the model factory merges
     /// `suppress_tokens` from `generation_config.json` on top.
@@ -2422,6 +2428,12 @@ public final class Gemma4Unified: Module, VLMModel, KVCacheDimensionProvider,
     public var vocabularySize: Int { config.vocabularySize }
     public var kvHeads: [Int] { languageModel.kvHeads }
     public var loraLayers: [Module] { languageModel.model.layers }
+
+    /// Final-norm hidden states of the text decoder, `(B, L, hiddenSize)`: the LM head's input.
+    /// Same as `Gemma4.textHiddenStates(_:)`.
+    @_spi(GemmaEncoder) public func textHiddenStates(_ inputs: MLXArray) -> MLXArray {
+        languageModel.model(inputs).hidden
+    }
 
     /// Multimodal placeholder token IDs that must never be sampled as text.
     /// Seeded from the model configuration; the model factory merges
