@@ -1,0 +1,90 @@
+name: Visionkit patch rebase
+
+# Visionkit pins this fork for its vision-tower LoRA patch. Each week, replay that patch onto the latest
+# upstream release as branch visionkit-<tag>, compile-check it, and push it. Visionkit's own "MLX update"
+# workflow picks the new branch up and opens the dependency PR there. If a patch commit no longer applies,
+# this job fails and the patch is rebased by hand.
+
+on:
+  schedule:
+    - cron: '0 0 * * 1'   # Mondays 00:00 UTC (09:00 JST), an hour before Visionkit's check
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: visionkit-rebase
+  cancel-in-progress: false
+
+jobs:
+  rebase:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find the latest upstream release and the current patch
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/ml-explore/mlx-swift-lm.git
+          git fetch --quiet upstream --tags
+          tag=$(gh api repos/ml-explore/mlx-swift-lm/releases/latest --jq .tag_name)
+          # The tag names a branch and is passed to git: accept only a plain X.Y.Z.
+          if ! [[ "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo "::error::unexpected release tag '$tag'"; exit 1; fi
+          # Patch source: the newest visionkit-X.Y.Z branch; visionkit-pin-3 is the pin from before this workflow.
+          src=$(git branch -r --list 'origin/visionkit-[0-9]*' --format='%(refname:short)' | sed 's#^origin/##' | sort -V | tail -1)
+          src=${src:-visionkit-pin-3}
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "src=$src" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --heads origin "visionkit-$tag" > /dev/null; then
+            echo "visionkit-$tag already exists; nothing to do"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Replaying $src onto upstream $tag"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Replay the patch onto the release
+        if: steps.plan.outputs.skip == 'false'
+        env:
+          TAG: ${{ steps.plan.outputs.tag }}
+          SRC: ${{ steps.plan.outputs.src }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Commits on the patch branch that upstream doesn't already have (compared by content, so a patch
+          # that was upstreamed drops out instead of conflicting).
+          patches=$(git rev-list --reverse --no-merges --cherry-pick --right-only "upstream/main...origin/$SRC")
+          if [ -z "$patches" ]; then echo "::error::no Visionkit patch commits found on $SRC"; exit 1; fi
+          git checkout --quiet -b "visionkit-$TAG" "$TAG"
+          for c in $patches; do
+            if ! git cherry-pick "$c"; then
+              echo "::error::'$(git log -1 --format=%s "$c")' does not apply to $TAG: rebase the patch by hand"
+              exit 1
+            fi
+          done
+          git log --oneline "$TAG..HEAD"
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        if: steps.plan.outputs.skip == 'false'
+        with:
+          xcode-version: '26.5'
+
+      - name: Compile check (MLXVLM for iOS)
+        if: steps.plan.outputs.skip == 'false'
+        run: |
+          xcodebuild -scheme MLXVLM -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/dd" \
+            -skipPackagePluginValidation -skipMacroValidation build
+
+      - name: Push visionkit-<tag>
+        if: steps.plan.outputs.skip == 'false'
+        env:
+          TAG: ${{ steps.plan.outputs.tag }}
+        run: git push origin "visionkit-$TAG"
