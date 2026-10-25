@@ -1976,6 +1976,16 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
         languageModel.model(inputs).hidden
     }
 
+    /// Final hidden states for `inputs` with `image`'s soft tokens on its placeholder rows, built the
+    /// way `prepare` builds them for generation (placeholders use the pad id for per-layer inputs).
+    @_spi(GemmaEncoder) public func hiddenStates(
+        _ inputs: MLXArray, image: LMInput.ProcessedImage
+    ) throws -> MLXArray {
+        let (inputsEmbeds, perLayerInputs) = try getInputEmbeddings(inputIds: inputs, image: image)
+        return languageModel.model(inputs, inputsEmbeds: inputsEmbeds, perLayerInputs: perLayerInputs)
+            .hidden
+    }
+
     public init(_ config: Gemma4Configuration) {
         self.config = config
         self._visionTower.wrappedValue = Gemma4VisionModel(config: config.visionConfiguration)
