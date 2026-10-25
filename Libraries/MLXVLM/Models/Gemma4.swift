@@ -1976,14 +1976,23 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
         languageModel.model(inputs).hidden
     }
 
-    /// Final hidden states for `inputs` with `image`'s soft tokens on its placeholder rows, built the
-    /// way `prepare` builds them for generation (placeholders use the pad id for per-layer inputs).
-    @_spi(GemmaEncoder) public func hiddenStates(
-        _ inputs: MLXArray, image: LMInput.ProcessedImage
-    ) throws -> MLXArray {
-        let (inputsEmbeds, perLayerInputs) = try getInputEmbeddings(inputIds: inputs, image: image)
-        return languageModel.model(inputs, inputsEmbeds: inputsEmbeds, perLayerInputs: perLayerInputs)
-            .hidden
+    /// Final-norm hidden states of the text decoder for `input`, `(B, L, hiddenSize)`: the
+    /// tensor the LM head consumes, built as `prepare` builds it, without the head or a cache.
+    @_spi(GemmaEncoder) public func hiddenStates(_ input: LMInput) throws -> MLXArray {
+        guard input.image != nil || input.video != nil else {
+            return languageModel.model(input.text.tokens).hidden
+        }
+        let (inputsEmbeds, perLayerInputs) = try getInputEmbeddings(
+            inputIds: input.text.tokens, image: input.image, video: input.video)
+        let tokenTypeIds = gemma4TokenTypeIds(
+            inputIds: input.text.tokens,
+            imageTokenId: config.imageTokenId,
+            videoTokenId: config.videoTokenId,
+            audioTokenId: config.audioTokenId)
+        return languageModel.model(
+            nil, inputsEmbeds: inputsEmbeds, perLayerInputs: perLayerInputs,
+            tokenTypeIds: tokenTypeIds
+        ).hidden
     }
 
     public init(_ config: Gemma4Configuration) {
