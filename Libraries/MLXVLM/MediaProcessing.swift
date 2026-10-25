@@ -122,6 +122,9 @@ public enum MediaProcessing {
         filter.inputImage = image
         filter.scale = Float(yScale)
         filter.aspectRatio = Float(xScale / yScale)
+        // Catmull-Rom (B 0, C 0.5), the cubic PIL and torchvision use; Core Image defaults to C 0.75.
+        filter.parameterB = 0
+        filter.parameterC = 0.5
         let scaledImage = filter.outputImage!
 
         // Create a rect with the exact dimensions we want
